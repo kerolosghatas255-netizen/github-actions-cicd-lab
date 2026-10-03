@@ -193,3 +193,74 @@ jobs:
 
       - name: Show staging container
         run: docker ps --filter name=cicd-staging
+
+  deploy-production:
+    name: Deploy to Production
+    needs: deploy-staging
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    environment:
+      name: production
+
+    concurrency:
+      group: production-deployment
+      cancel-in-progress: false
+
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - cicd-lab
+
+    steps:
+      - name: Set deployment metadata
+        run: |
+          echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY}" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Pull release image
+        run: |
+          docker pull ${IMAGE_NAME}:sha-${SHORT_SHA}
+
+      - name: Remove previous production container
+        run: |
+          docker rm -f cicd-production || true
+
+      - name: Deploy production container
+        run: |
+          docker run -d \
+            --name cicd-production \
+            --restart unless-stopped \
+            -p 8082:5000 \
+            -e APP_ENV=production \
+            ${IMAGE_NAME}:sha-${SHORT_SHA}
+
+      - name: Wait for production
+        run: |
+          for i in {1..20}; do
+            if curl -fsS http://127.0.0.1:8082/health; then
+              exit 0
+            fi
+
+            echo "Waiting for production..."
+            sleep 2
+          done
+
+          docker logs cicd-production
+          exit 1
+
+      - name: Verify production health
+        run: |
+          curl -fsS http://127.0.0.1:8082/health
+          echo
+
+      - name: Verify production version
+        run: |
+          RESPONSE="$(curl -fsS http://127.0.0.1:8082/version)"
+          echo "$RESPONSE"
+
+          echo "$RESPONSE" | grep "\"commit\":\"${SHORT_SHA}\""
+          echo "$RESPONSE" | grep '"environment":"production"'
+
+      - name: Show production container
+        run: docker ps --filter name=cicd-production
