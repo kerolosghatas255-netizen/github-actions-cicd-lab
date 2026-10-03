@@ -194,6 +194,7 @@ jobs:
       - name: Show staging container
         run: docker ps --filter name=cicd-staging
 
+
   deploy-production:
     name: Deploy to Production
     needs: deploy-staging
@@ -222,6 +223,20 @@ jobs:
         run: |
           docker pull ${IMAGE_NAME}:sha-${SHORT_SHA}
 
+      - name: Save current production image
+        run: |
+          PREVIOUS_IMAGE="$(docker inspect \
+            --format '{{.Config.Image}}' \
+            cicd-production 2>/dev/null || true)"
+
+          echo "PREVIOUS_IMAGE=${PREVIOUS_IMAGE}" >> "$GITHUB_ENV"
+
+          if [ -n "$PREVIOUS_IMAGE" ]; then
+            echo "Current production image: $PREVIOUS_IMAGE"
+          else
+            echo "No previous production image found"
+          fi
+
       - name: Remove previous production container
         run: |
           docker rm -f cicd-production || true
@@ -239,6 +254,7 @@ jobs:
         run: |
           for i in {1..20}; do
             if curl -fsS http://127.0.0.1:8082/health; then
+              echo "Production health check passed"
               exit 0
             fi
 
@@ -246,7 +262,8 @@ jobs:
             sleep 2
           done
 
-          docker logs cicd-production
+          echo "Production health check failed"
+          docker logs cicd-production || true
           exit 1
 
       - name: Verify production health
@@ -262,5 +279,51 @@ jobs:
           echo "$RESPONSE" | grep "\"commit\":\"${SHORT_SHA}\""
           echo "$RESPONSE" | grep '"environment":"production"'
 
-      - name: Show production container
-        run: docker ps --filter name=cicd-production
+      - name: Roll back failed production deployment
+        if: failure()
+        run: |
+          echo "New production deployment failed."
+
+          if [ -z "${PREVIOUS_IMAGE}" ]; then
+            echo "No previous production image is available for rollback."
+            exit 1
+          fi
+
+          echo "Rolling back to: ${PREVIOUS_IMAGE}"
+
+          docker rm -f cicd-production || true
+
+          docker run -d \
+            --name cicd-production \
+            --restart unless-stopped \
+            -p 8082:5000 \
+            -e APP_ENV=production \
+            "${PREVIOUS_IMAGE}"
+
+          for i in {1..20}; do
+            if curl -fsS http://127.0.0.1:8082/health; then
+              echo
+              echo "ROLLBACK SUCCESSFUL"
+              echo "Restored version:"
+              curl -fsS http://127.0.0.1:8082/version
+              echo
+              exit 0
+            fi
+
+            echo "Waiting for rollback..."
+            sleep 2
+          done
+
+          echo "ROLLBACK FAILED"
+          docker logs cicd-production || true
+          exit 1
+
+      - name: Show final production state
+        if: always()
+        run: |
+          echo "Production container:"
+          docker ps -a --filter name=cicd-production
+
+          echo
+          echo "Production version:"
+          curl -fsS http://127.0.0.1:8082/version || true
