@@ -246,7 +246,7 @@ jobs:
           docker run -d \
             --name cicd-production \
             --restart unless-stopped \
-            -p 8082:5999 \
+            -p 8082:5000 \
             -e APP_ENV=production \
             ${IMAGE_NAME}:sha-${SHORT_SHA}
 
