@@ -128,3 +128,68 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker rm -f cicd-ci-test || true
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - staging
+      - cicd-lab
+
+    steps:
+      - name: Set deployment metadata
+        run: |
+          echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY}" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Pull release image
+        run: |
+          docker pull ${IMAGE_NAME}:sha-${SHORT_SHA}
+
+      - name: Remove previous staging container
+        run: |
+          docker rm -f cicd-staging || true
+
+      - name: Deploy staging container
+        run: |
+          docker run -d \
+            --name cicd-staging \
+            --restart unless-stopped \
+            -p 8081:5000 \
+            -e APP_ENV=staging \
+            ${IMAGE_NAME}:sha-${SHORT_SHA}
+
+      - name: Wait for staging
+        run: |
+          for i in {1..20}; do
+            if curl -fsS http://127.0.0.1:8081/health; then
+              exit 0
+            fi
+
+            echo "Waiting for staging..."
+            sleep 2
+          done
+
+          docker logs cicd-staging
+          exit 1
+
+      - name: Verify staging health
+        run: |
+          curl -fsS http://127.0.0.1:8081/health
+          echo
+
+      - name: Verify staging version
+        run: |
+          RESPONSE="$(curl -fsS http://127.0.0.1:8081/version)"
+          echo "$RESPONSE"
+
+          echo "$RESPONSE" | grep "\"commit\":\"${SHORT_SHA}\""
+          echo "$RESPONSE" | grep '"environment":"staging"'
+
+      - name: Show staging container
+        run: docker ps --filter name=cicd-staging
